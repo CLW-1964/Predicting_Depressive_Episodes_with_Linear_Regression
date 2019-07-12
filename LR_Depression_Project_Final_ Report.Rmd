@@ -1,0 +1,542 @@
+---
+title: "Capstone Project Final Report"
+author: "CLW"
+date: "June 28, 2018"
+output: 
+  md_document:
+    variant: markdown_github
+
+---
+# Capstone Project Final Report
+
+# *Predicting or Detecting a Depressive Episode in a Patient with a History of Chronic Depression*
+
+## Overview
+
+It is estimated that 25 million Americans suffer from depression each year and over 50% of all people who die by suicide suffer from major depression. Additionally, depression is among the most treatable of psychiatric illnesses with 80% to 90% responding positively to treatment. 
+
+The goal of this preliminary study was to determine if they could identify a depressive episode in a patient who wished to be taken off of antidepressant medication after an 8.5-year history of chronic depression.
+
+This study is unusual in that there is only one subject. Furthermore, the idea for the study was presented by this subject.  Which means the results of this study are only germane to this particular patient. But it can serve as the framework for larger future experiments.
+
+Mental health, primary healthcare providers and patients would all from using this information.  using this information. The ability to identify a new depressive episode and intervene appropriately could save untold numbers of lives. 
+
+## The Data
+
+The dataset contains the results of a series of questions that were asked of the patient several times a day, daily and weekly over the course of 239 days. The study was broken down into five phases:
+
+* Phase 1 - Baseline period lasting four weeks where the medication dosage was kept constant 150 mg
+* Phase 2 - The researchers called this a double-blind phase. The medication dosage was not modified and lasted for two weeks
+* Phase 3 - A double-blind period lasting eight weeks where the medication dosage was gradually decreased on a schedule randomly chosen by a pharmacist
+* Phase 4 - A post-assessment period lasting eight weeks in which the patient was completely off the medication
+* Phase 5 - A twelve-week follow-up period.
+
+With over 80 variables the potential for multicollinearity is high so reasonable effort will be focused on determining the best variables for testing using linear regression. 
+
+## Data Wrangling
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(Hmisc)
+library(quantreg)
+library(RColorBrewer)
+library(GGally)
+library(ggvis)
+library(corrgram)       
+library(corrplot)
+
+ESMdata <- read_csv("ESMdata.csv")
+
+ESMdata %>% glimpse()
+```
+
+In general, the dataset was relatively clean.
+
+* The date variable was reformatted from a character to date format
+* New variable created for calculating the amount of time it took the patient to begin taking the survey
+* A Date/Time field was created for performing time series analysis
+* New variable created for calculating how long it took him to take the survey
+
+```{r}
+
+ESMdata <- ESMdata %>%
+  mutate(date = as.Date(date, "%d/%m/%y"),
+         survey_time_to_take = resptime_e - resptime_s,
+         datetime = as.POSIXct(paste(ESMdata$date, ESMdata$beeptime), 
+                               format = "%Y-%m-%d %H:%M:%S", tz = "GMT"),
+         survey_time_to_start = resptime_s - beeptime)
+
+```
+
+There were however a large number of “NA’s” contained in the dataset.
+
+```{r}
+ESMdata %>% 
+  summarise_all(funs(sum(is.na(.)))) %>% 
+  gather(col_name, count_NAs) %>%
+  print(n = Inf) 
+
+```
+
+This is understandable because the dataset is comprised of responses to questions that are answered at different intervals:
+
+* Several times a day
+* Once a day
+* Once a week
+
+Additionally, there are questions that will only be answered based upon the choice of a previous question. At this phase of the project I left the NA’s intact.
+
+
+## Data Discovery
+
+```{r message=FALSE}
+DatDisc <- read_csv("ESMdata_clean3.csv")
+```
+
+Since the goal is to determine if we can predict depressive episodes, it may seem natural to use the dep variable for comparison purposes. The dep variable is the average score of the 13 questions from the depression subscale of the SCL-90-R. However, I am not a fan of averages in general and decided to create a new field which is the sum of the values for comparison purposes.
+
+```{r}
+Grouped_DatDisc <- DatDisc %>%
+  mutate(n_Sum_dep = SCL.90.R.14+SCL.90.R.20+SCL.90.R.22+SCL.90.R.5+
+                      SCL.90.R.29+SCL.90.R.26+SCL.90.R.15+SCL.90.R.30+
+                      SCL.90.R.31+SCL.90.R.31+SCL.90.R.32+SCL.90.R.54+
+                      SCL.90.R.71+SCL.90.R.79) 
+```
+
+Traditionally, the initial phase of data discovery involves creating scatter plots, histograms, and bar charts to look for patterns in the data and possible variable interactions.
+
+In this dataset there are 86 variables. In order to simplify the first pass at the data I grouped the variables that were asked multiple times per day into three new categories.
+
+* Positive Mood and Self Esteem Indicators - Questions such as, "I feel cheerful", and "I like myself"
+
+* Negative Mood and Self Esteem Indicators - Questions such as, "I am anxious", and "I feel worried"
+
+* Physical Indicators - Questions such as, "I am tired", and "I am in pain"
+
+All questions in these groupings were measured using one of two scales. A Likert scale ranging from –3 to 3 or a 7-point Likert scale ranging from 1 to 7. Because I chose to group into these three categories by summing the values of their individual scores, I chose to create some new variables and transform the -3 to 3 Likert scale questions to the 7-point Likert scale.
+
+```{r}
+Grouped_DatDisc <- Grouped_DatDisc %>%
+
+# recode variables on a -3 to 3 scale to a 1 to 7 scale 
+#in order to sum with other Negative Indicators
+  mutate("n_mood_down" = mood_down + 4,
+         "n_mood_lonely" = mood_lonely + 4,
+         "n_mood_anxious" = mood_anxious + 4,
+         "n_mood_guilty" = mood_guilty + 4
+         ) %>%
+  
+
+# Create Groupong variables for Positive Mood and Self Esteem Indicators, 
+# Negative Mood and Self Esteem Indicators, and Physical Indicators
+  
+  mutate(n_Neg_Ind = n_mood_down+mood_irritat+n_mood_lonely+
+                      n_mood_anxious+mood_suspic+n_mood_guilty+
+                      mood_doubt+pat_restl+pat_agitate+pat_worry+
+                      se_ashamed+se_selfdoub) %>%
+
+ 
+  mutate( n_Pos_Ind = mood_relaxed+mood_satisfi+mood_enthus+
+                      mood_cheerf+mood_strong+pat_concent+
+                      se_selflike+se_handle) %>%
+    
+  mutate(n_Physical_Ind = phy_hungry+phy_tired+phy_pain+
+                          phy_dizzy+phy_drymouth+phy_nauseous+
+                          phy_headache+phy_sleepy) 
+```
+
+First, we examine the distributions of the newly created grouped variables
+
+```{r GroupedHistFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Sum_dep), fill = "red")
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Neg_Ind), fill = "red")
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Pos_Ind), fill = "red")
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Physical_Ind), fill = "red")
+
+```
+
+Nothing too unusual here. n_Sum_dep could possibly be bimodal, but otherwise spread relatively evenly. The n_Neg_Ind values appear normal-ish, possibly right skewed. n_Pos_Ind values again appear bimodal. And interestingly enough the n_Physical_Ind values give the appearance of a Poisson distribution.
+
+These variations in the distributions are not concerning. Because we are really looking at a five-phase experiment we need to look at the distributions with respect to the different phases.
+
+```{r nSumDep_HistoFacetFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Sum_dep), fill = "blue") +
+facet_grid(phase ~ .)
+
+```
+
+The faceted view of n_Sum_dep seems to show a generalized increase in the depression score as the patient progresses through the phases of the experiment.
+
+```{r nNegInd_HistoFacetFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Neg_Ind), fill = "blue") + labs(x = "Negative Mood Indicator Score",  title = "Negative Mood Score Distribution by Experiment Phase") +
+  facet_grid(phase ~ .)
+```
+
+The negative mood indicators, n_Neg_Ind, is interesting. These questions were valued from 1 to 7, with 1 being not and 7 being very. I would have expected more of a shift in the distributions of phases four and five when the patient was completely off the medication. The only thing I see is a heavier tail on the right of the phase five distribution.
+
+```{r nPosgInd_HistoFacetFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Pos_Ind), fill = "blue") + labs(x = "Positive Mood Indicator Score", title = "Positive Mood Score Distribution by Experiment Phase") +
+  facet_grid(phase ~ .)
+```
+
+For the positive mood indicators, n_Pos_Ind, I might have expected more of a shift in the distributions to the left in phases four and five. But the left skew and heavier tail on the left tells me something is going on.
+
+```{r nPhysicalInd_HistofacetFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc) + geom_histogram(aes(x = n_Physical_Ind), fill = "blue") + labs(x = "Physical Symptoms Indicator Score",  title = "Physical Symptoms Score Distribution by Experiment Phase") +
+  facet_grid(phase ~ .)
+```
+
+The physical indicator grouping, n_Physical_Ind, at first glance may be what you expect. It would be reasonable to expect for feelings such as pain, dizziness, and headaches might increase after being taken off of the medication. However, in phase five the Poisson distribution really begins to take shape. My suspicion is that this is the result of the side effects of the medication no longer being present and may also have no relation to depression or predicting depressive episodes.
+
+```{r GroupedVsTime_ScatterFinal, message=FALSE, warning=FALSE}
+#Time series scatterplots
+ggplot(Grouped_DatDisc, aes(x = datetime, y = n_Sum_dep, color = factor(phase))) +
+  geom_point()+
+  geom_jitter() +
+  labs(x = "Date", y = "Depression Score",  title = "Depression Score vs Time", colour = "Phase") +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE)
+
+ggplot(Grouped_DatDisc, aes(x = datetime, y = n_Neg_Ind, color = factor(phase))) +
+  geom_point()+
+  geom_jitter() +
+  labs(x = "Date", y = "Negative Mood Indicator Score",  title = "Negative Mood Score vs Time", colour = "Phase") +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE)
+
+ggplot(Grouped_DatDisc, aes(x = datetime, y = n_Pos_Ind, color = factor(phase))) +
+  geom_point()+
+  geom_jitter() +
+  labs(x = "Date", y = "Positive Mood Indicator Score",  title = "Positive Mood Score vs Time", colour = "Phase") +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE)
+
+ggplot(Grouped_DatDisc, aes(x = datetime, y = n_Physical_Ind, color = factor(phase))) +
+  geom_point()+
+  geom_jitter() +
+  labs(x = "Date", y = "Physical Symptoms Indicator Score",  title = "Physical Symptoms Score vs Time", colour = "Phase") +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE)
+```
+
+Since the initial plan was to use the grouped depression score, n_Sum_dep, to predict or detect a depressive episode, we will next examine scatterplots of n_Sum_dep vs the other grouping factors. Additionally, facets need to be added to the graphs to see the true impact of the experiment phase.
+
+```{r SumDepVsNegInd_byPhaseFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc, aes(x = n_Neg_Ind, y = n_Sum_dep, color = factor(phase))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_grid(. ~ phase)
+```
+
+Now we are starting to see some things. Because of the shortness of phase two there was only one weekly depression survey completed. Phases three and four are interesting in that they show two clusters. In other words, for the same n_Neg_Ind value the value of n_Sum_dep can vary by 10 or more points. Phase five is the tightest group and also contains several outliers. Also, in phase five, the trendline seems to indicate that as the n_Neg_Ind score increases the depression score decreases slightly.
+
+```{r SumDepVsPosInd_byPhaseFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc, aes(x = n_Pos_Ind, y = n_Sum_dep, color = factor(phase))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_grid(. ~ phase)
+```
+
+Here again we see the same clustering pattern in phases three and four. While the depression scores of phase five are elevated more than the other four phases it shows another counterintuitive trend. As the positive feeling scores increase, so does the depression score.
+
+```{r SumDepVsPhysInd_byPhaseFinal, message=FALSE, warning=FALSE}
+ggplot(Grouped_DatDisc, aes(x = n_Physical_Ind, y = n_Sum_dep, color = factor(phase))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_grid(. ~ phase)
+```
+
+Same clustering pattern noted previously for phases three and four noted. Again, the counterintuitive trend in phase five continues. As the adverse physical symptoms increase, the depression score decreases.
+
+
+After haven taken a higher-level look at the data it's time to take a deeper dive and do a little feature engineering. Here I will use linear regression and analysis of variance to see if I can eliminate unnecessary variables or recode others in order to build a predictive model for depressive episode identification.
+
+## ANOVA by Phase of the Experiment
+
+Previously I noted that the values of the grouping variables changed during the different phases of the experiment. Now let's take a look at the primary variable of interest, the depression index, and see if it differs significantly over the five phases of the experiment
+
+```{r}
+u_fit <- aov(n_Sum_dep ~ factor(phase), Grouped_DatDisc)
+anova(u_fit)
+TukeyHSD(u_fit)
+```
+
+Looking at the Analysis of Variance Table we see that the overall model has an extremely low Pr(>F) value. 
+
+To dive deeper we next perform Tukey multiple comparisons of the means. Here we see phases one, two and three are not statistically significantly different. However, phases four and five are significantly different than all other levels.
+
+For visual reference, let’s take a look at the 95% CI for the differences in means between phases and boxplots
+
+```{r BoxplotDepVsPhaseFinal, warning=FALSE}
+## Visual conformation
+plot(TukeyHSD(u_fit))
+ggplot(Grouped_DatDisc, aes( factor(phase) , n_Sum_dep)) +
+  geom_boxplot(outlier.colour = "red", outlier.shape = 2) +
+  geom_jitter(width = 0.1) 
+```
+
+The boxplots confirm what we saw in the faceted scatterplots. Phases three and four each have two clusters of data points, and phases four and five show elevated depression scores.
+
+
+## Dealing with the Missing Values
+
+Missing values, NA's, were not a big problem in the initial data discovery phase because we were essentially looking for patterns in the data to help determine the next steps for analysis. Here we can see the overwhelming majority of our grouped depression scores are missing.
+
+```{r}
+Grouped_DatDisc %>% count(n_Sum_dep)
+```
+
+Briefly, the SCL.90.R questions which were used to calculate n_Sum_dep relate to how the patient felt over the *previous* seven day period. 
+
+Instead of upfilling the depression scores to match the grouped scores of the previous week, I will create a new field for the week in question, then create a new data frame that groups by the new week. 
+
+I will use the means of the independent variables I intend to regress upon the dependent depression score variable.
+
+```{r}
+# first create the  two day offset in the day_since_start field to ensure 
+# the depression scores are looking backward
+Grouped_DatDisc <- Grouped_DatDisc %>%
+  mutate(day_since_start = date - date[2],
+         week_group = floor(day_since_start/7) + 1) 
+```
+
+We now have a group_by variable, week_group.  Now create a new data frame to look at the average of the grouped mood and physical indicators that were created earlier as a first look.
+
+If any of the grouped variables show a strong correlation they will be broken down into their individual components to see if a stronger model can be built.
+
+```{r}
+# New DF for the grouping by week of the grouped mood indicators
+WeeklyGroupedInd <- Grouped_DatDisc %>% 
+  group_by(week_group) %>% 
+  summarise(mean_negmood_ind = mean(n_Neg_Ind, na.rm = TRUE),
+            mean_posmood_ind = mean(n_Pos_Ind, na.rm = TRUE),
+            mean_physym_ind = mean(n_Physical_Ind, na.rm = TRUE),
+            mean_dep_score = mean(n_Sum_dep, na.rm = TRUE)) %>% 
+  arrange(week_group) %>%
+  print(n = Inf)
+```
+
+
+## Multiple linear regression of the grouped variables
+
+```{r}
+lmFitWeeklyGroupedInd <- lm(mean_dep_score ~ mean_negmood_ind + 
+                              mean_posmood_ind + mean_physym_ind,
+                            WeeklyGroupedInd)
+summary(lmFitWeeklyGroupedInd)
+```
+
+The mean_negmood_ind variable shows a strong positive correlation, mean_physym_ind show a strong negative correlation. The overall model Adjusted R-squared is 0.7575.
+
+Remove mean_posmood_ind to see if it strengthens the model.
+
+
+```{r}
+lmFitWeeklyGroupedInd2 <- lm(mean_dep_score ~ mean_negmood_ind + 
+                            mean_physym_ind, WeeklyGroupedInd)          
+summary(lmFitWeeklyGroupedInd2)
+```
+
+Uncouple the grouped variables for the negative mood and physical symptom indicators since that pair had the highest Adjusted R-square and perform linear regression of the individual scores against the depression score
+
+
+```{r}
+WeeklyNegPhys <- Grouped_DatDisc %>% 
+  group_by(week_group) %>% 
+  summarise(mean_n_mood_down = mean(n_mood_down, na.rm = TRUE),
+            mean_mood_irritat = mean(mood_irritat, na.rm = TRUE),
+            mean_n_mood_lonely = mean(n_mood_lonely, na.rm = TRUE),
+            mean_n_mood_anxious = mean(n_mood_anxious, na.rm = TRUE),
+            mean_mood_suspic = mean(mood_suspic, na.rm = TRUE),
+            mean_n_mood_guilty = mean(n_mood_guilty, na.rm = TRUE),
+            mean_mood_doubt = mean(mood_doubt, na.rm = TRUE),
+            mean_pat_restl = mean(pat_restl, na.rm = TRUE),
+            mean_pat_agitate = mean(pat_agitate, na.rm = TRUE),
+            mean_pat_worry = mean(pat_worry, na.rm = TRUE),
+            mean_se_ashamed = mean(se_ashamed, na.rm = TRUE),
+            mean_se_selfdoub = mean(se_selfdoub, na.rm = TRUE),
+            
+            #Physical Indicators
+            mean_phy_hungry = mean(phy_hungry, na.rm = TRUE),
+            mean_phy_tired = mean(phy_tired, na.rm = TRUE),
+            mean_phy_pain = mean(phy_pain, na.rm = TRUE),
+            mean_phy_dizzy = mean(phy_dizzy, na.rm = TRUE),
+            mean_phy_drymouth = mean(phy_drymouth, na.rm = TRUE),
+            mean_phy_nauseous = mean(phy_nauseous, na.rm = TRUE),
+            mean_phy_headache = mean(phy_headache, na.rm = TRUE),
+            mean_phy_sleepy = mean(phy_sleepy, na.rm = TRUE),
+            mean_dep_score = mean(n_Sum_dep, na.rm = TRUE),
+            
+            #morning questions to assess sleep
+            mean_mor_asleep = mean(mor_asleep, na.rm = TRUE),
+            mean_mor_nrwakeup = mean(mor_nrwakeup, na.rm = TRUE),
+            mean_mor_lieawake = mean(mor_lieawake, na.rm = TRUE),
+            mean_mor_qualsleep = mean(mor_qualsleep, na.rm = TRUE)
+              ) %>% 
+  arrange(week_group) 
+```
+
+First, we will look at the negative mood indicators vs the depression score to see if we can improve upon the grouped negative mood and physical symptom indicators model Adjusted R-squared of 0.7575.
+
+
+```{r}
+lmnp1 <- lm(mean_dep_score ~ mean_n_mood_down, WeeklyNegPhys)
+summary(lmnp1) # R^2 = 0.59 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_mood_irritat, WeeklyNegPhys)
+summary(lmnp1) #R^2 = 0.3214 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_n_mood_lonely, WeeklyNegPhys)
+summary(lmnp1) # R^2 = 0.4824 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_n_mood_anxious , WeeklyNegPhys)
+summary(lmnp1) # R^2 = 0.2699 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_mood_suspic, WeeklyNegPhys)
+summary(lmnp1) # R^2=0.6599 significant ********************************
+
+lmnp1 <- lm(mean_dep_score ~ mean_n_mood_guilty, WeeklyNegPhys)
+summary(lmnp1) #R^2 =0.3844 sig
+
+lmnp1 <- lm(mean_dep_score ~ mean_mood_doubt, WeeklyNegPhys)
+summary(lmnp1) # R^2 = 0.2424 significant
+
+lmnp1 <- lm(mean_dep_score ~  mean_pat_restl, WeeklyNegPhys)
+summary(lmnp1) #R^2 =0.3092 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_pat_agitate, WeeklyNegPhys)
+summary(lmnp1) #R^2 = 0.3239 significant
+
+lmnp1 <- lm(mean_dep_score ~ mean_pat_worry, WeeklyNegPhys)
+summary(lmnp1) #R^2 jumps to 0.774 which is higher than the grouped mean_negmood_ind of 0.5589 and also higher than the combined   mean_negmood_ind & mean_physym_ind of 0.765
+lmnp1 <- lm(mean_dep_score ~  mean_se_ashamed, WeeklyNegPhys)
+summary(lmnp1) #R^2 dips 0.5205 significant
+
+lmnp1 <- lm(mean_dep_score ~  mean_se_selfdoub, WeeklyNegPhys)
+summary(lmnp1) #R^2 dips to 0.2475 significant
+
+```
+
+Here we see the mean_pat_worry variable by itself is significant and has a higher Adjusted R-square, 0.774, than the grouped negative mood indicators (0.5589) or the combined grouped negative mood and physical symptom indicators (0.765).
+
+```{r DepVWorryFinal, message=FALSE, warning=FALSE}
+ggplot(WeeklyNegPhys, aes(x = mean_pat_worry, y = mean_dep_score)) +
+  geom_point( color = "black") +
+  geom_smooth(method = "lm", se = TRUE)
+```
+
+
+Looking at the depression score vs mean_pat_ worry we see the linear model performs reasonably well.
+
+Next, add the individual physical symptom indicators to mean_pat_worry to see if the model can be improved.
+
+```{r}
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_hungry, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_tired, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_pain, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~  mean_pat_worry + mean_phy_dizzy, WeeklyNegPhys)
+summary(lmnp2)   ###  AdjR^2 0.8139, both terms significant********************
+
+lmnp2 <- lm(mean_dep_score ~  mean_pat_worry + mean_phy_drymouth, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_nauseous, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_headache, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+
+lmnp2 <- lm(mean_dep_score ~ mean_pat_worry + mean_phy_sleepy, WeeklyNegPhys)
+summary(lmnp2) #no improvement
+```
+
+Here we see that adding mean_phy_dizzy to the model increase the Adjusted R^2 from 0.774 to 0.8139!
+
+Looking at the depression score vs mean_phy_dizzy we have an issue!
+
+```{r DepVDizzyFinal, message=FALSE, warning=FALSE}
+ggplot(WeeklyNegPhys, aes(x = mean_phy_dizzy, y = mean_dep_score)) +
+  geom_point( color = "red") +
+  geom_smooth(method = "lm", se = TRUE)
+```
+
+With the exception of 6 weeks, the average weekly dizziness score was 1. While the graph clearly shows, with the exception of one of those weeks, that if the patient was experiencing dizziness his depression was higher than usual, I do not consider dizziness to be an appropriate variable to include in the model.
+
+And finally, I want to see if the patients sleep patterns and quality affect the depression score.
+
+```{r}
+lmnp3 <- lm(mean_dep_score ~  mean_pat_worry + mean_mor_asleep, WeeklyNegPhys)
+summary(lmnp3) #AdjR^2 improved to 0.798! all terms significant
+
+lmnp3 <- lm(mean_dep_score ~  mean_pat_worry + mean_mor_nrwakeup, WeeklyNegPhys)
+summary(lmnp3) #AdjR^2 improved to 0.8104! all terms significant
+
+lmnp3 <- lm(mean_dep_score ~  mean_pat_worry + mean_mor_lieawake, WeeklyNegPhys)
+summary(lmnp3) #AdjR^2 improved to 0.8287 all terms significant
+
+lmnp3 <- lm(mean_dep_score ~  mean_pat_worry + mean_mor_qualsleep, WeeklyNegPhys)
+summary(lmnp3) # no improvement
+```
+
+As you can see all of the sleep variables, when added to the previous model improve the strength of the model. The Adjusted R-square for all terms is over 0.79!
+
+```{r DepVSleepFinal, message=FALSE, warning=FALSE}
+ggplot(WeeklyNegPhys, aes(x = mean_mor_asleep, y = mean_dep_score)) +
+  geom_point( color = "black") +
+  geom_smooth(method = "lm", se = TRUE)
+ggplot(WeeklyNegPhys, aes(x = mean_mor_nrwakeup, y = mean_dep_score)) +
+  geom_point( color = "black") +
+  geom_smooth(method = "lm", se = TRUE)
+ggplot(WeeklyNegPhys, aes(x = mean_mor_lieawake, y = mean_dep_score)) +
+  geom_point( color = "blue") +
+  geom_smooth(method = "lm", se = TRUE)
+ggplot(WeeklyNegPhys, aes(x = mean_mor_qualsleep, y = mean_dep_score)) +
+  geom_point( color = "red") +
+  geom_smooth(method = "lm", se = TRUE)
+```
+
+The chart for depression vs quality of sleep is negatively correlated and appears to be influenced by an outlier.
+
+The first three variables added to the model, mean_mor_asleep, mean_mor_nrwakeup and mean_mor_lieawake all improve the Adjusted R-square of the model with only mean_pat_worry. The chart with mean_mor_lieawake is the most evenly distributed and has the highest Adjusted R-square and was added to the model.....0.8287
+
+## Linear Model Discussion
+
+This is the regression equation I chose:
+
+mean_dep_score = -6.8317 + 15.5605(mean_pat_worry) + 2.5722(mean_mor_lieawake)
+
+This means that, holding mean_mor_lieawake constant, for every 1 point increase in the average weekly pat_worry question ("I worry") rated on a scale from 1 (not) to 7 (very), the patients average weekly depression score increases 15.5605 points.
+
+Holding mean_pat_worry constant, every 1 point increase in the average weekly mor_lieawake question ("How long did I lie awake this morning before getting out of bed") rated on a scale from 1 (0 to 5 min) to 8 (240 min +), the patients average weekly depression score increases 2.5722 points. 
+
+In other words, for this patient, his depression was elevated when he expressed feelings of worry, took longer on average to get out of bed. With the two variable linear model explaining 82.9% of the variation.
+
+
+In this equation, all coefficients including the y-intercept are statistically significant
+
+
+Coefficients    | Pr(>abs(t)) 
+--------------- | ---------------
+(Intercept)     | 0.01498
+mean_pat_worry  | 1.56e-06
+mean_mor_asleep | 0.00535
+
+
+## Ideas for Further Research
+
+It cannot be stressed enough the exploratory nature of this study. All of my findings are only valid for this individual, at this point in time. Larger and more diverse populations of patients would have to be included in order to make more concrete observations and potentially use the data for predictive purposes.
+
+It would be a massive undertaking; however, I believe this type of research is desperately needed. The impact of depression and its cost to our society are very high and I do not see them decreasing without intervention. Much like the Framingham Heart Study helped us understand the epidemiology of cardiovascular disease, the same commitment should be made to understand the epidemiology of depression and other mental disorders.
+
+
+## Recommendations
+
+The goal of this preliminary study was to determine if they could identify a depressive episode in a patient who wished to be taken off of antidepressant medication after an 8.5-year history of chronic depression. Within reason I believe I was successful with a two-factor model that explained ~83% of the variation. So, for this patient, at this point in time the following recommendations are made for the clinician and patient:
+
+1. Be aware of the patients reports of feeling worried, and not just expression of the word “_worry_”. Worry in itself is more an expression of anxiety over things that may happen in the future. It is the chronic state of this anxiety that manifests into depression. Giving the patient tools to recognize this pattern, then switching their focus from the future (worry) they created in their mind to the present moment can be an affective tool in breaking this pattern.
+
+2. Pay attention to the patients sleep patterns. All of the sleep variables increased the strength of the model as one would expect. I chose the variable that measured how long it took the patient to get out of bed upon waking for the model because it affected the Adjusted R-squared the most and was the most statistically significant. It is clear better sleep corresponds with less depression. Here, increased physical activity, relaxation techniques, and meditation would all help.
+
+3. Finally, even though I left the dizziness variable out of the model because I felt it was being driven by outliers, I think it still deserves consideration. It could also be a function of the side effects experienced when withdrawing from long-term antidepressant medication usage, or some other medical condition. If it is a withdrawal symptom of the medication it should subside after a couple of weeks, otherwise some other intervention may be required.
